@@ -1,18 +1,19 @@
-name: Build & Release JK2ModManager
+name: Build & Release Monolith
 
 permissions:
   contents: write
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 jobs:
   build:
     name: Build & Package (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
@@ -23,68 +24,160 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.10.11"
+          python-version: "3.12"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          pip install nuitka zstandard
           pip install -r requirements.txt
 
-      - name: Build executable
-        run: pyinstaller --clean jk2_mod_manager.spec
+      # Build (Windows)
+      - name: Build executable (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: powershell
+        run: >
+          python -m nuitka
+          --standalone
+          --onefile
+          --disable-console
+          --enable-plugin=tk-inter
+          --assume-yes-for-downloads
+          --include-module=pil_config
+          --include-module=PIL.Image
+          --include-module=PIL.ImageTk
+          --include-module=PIL._tkinter_finder
+          --include-module=PIL.JpegImagePlugin
+          --include-module=PIL.PngImagePlugin
+          --include-module=PIL.TgaImagePlugin
+          --nofollow-import-to=PIL.BmpImagePlugin
+          --nofollow-import-to=PIL.GifImagePlugin
+          --nofollow-import-to=PIL.TiffImagePlugin
+          --nofollow-import-to=PIL.WebPImagePlugin
+          --nofollow-import-to=PIL.PdfImagePlugin
+          --nofollow-import-to=PIL.PcxImagePlugin
+          --nofollow-import-to=PIL.IcoImagePlugin
+          --nofollow-import-to=PIL.XpmImagePlugin
+          --nofollow-import-to=PIL.FtexImagePlugin
+          --include-package-data=CTkMessagebox
+          --include-package-data=customtkinter
+          --windows-icon-from-ico=icon.ico
+          --lto=yes
+          monolith.py
 
+      # Build (Linux)
+      - name: Build executable (Linux)
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --output-dir=dist \
+            --enable-plugin=tk-inter \
+            --assume-yes-for-downloads \
+            --include-module=pil_config \
+            --include-module=PIL.Image \
+            --include-module=PIL.ImageTk \
+            --include-module=PIL._tkinter_finder \
+            --include-module=PIL.JpegImagePlugin \
+            --include-module=PIL.PngImagePlugin \
+            --include-module=PIL.TgaImagePlugin \
+            --nofollow-import-to=PIL.BmpImagePlugin \
+            --nofollow-import-to=PIL.GifImagePlugin \
+            --nofollow-import-to=PIL.TiffImagePlugin \
+            --nofollow-import-to=PIL.WebPImagePlugin \
+            --nofollow-import-to=PIL.PdfImagePlugin \
+            --nofollow-import-to=PIL.PcxImagePlugin \
+            --nofollow-import-to=PIL.IcoImagePlugin \
+            --nofollow-import-to=PIL.XpmImagePlugin \
+            --nofollow-import-to=PIL.FtexImagePlugin \
+            --include-package-data=CTkMessagebox \
+            --include-package-data=customtkinter \
+            --output-filename=Monolith \
+            monolith.py
+
+      # Build (macOS)
+      - name: Build executable (macOS)
+        if: matrix.os == 'macos-latest'
+        shell: bash
+        run: |
+          python -m nuitka \
+            --standalone \
+            --onefile \
+            --enable-plugin=tk-inter \
+            --assume-yes-for-downloads \
+            --include-module=pil_config \
+            --include-module=PIL.Image \
+            --include-module=PIL.ImageTk \
+            --include-module=PIL._tkinter_finder \
+            --include-module=PIL.JpegImagePlugin \
+            --include-module=PIL.PngImagePlugin \
+            --include-module=PIL.TgaImagePlugin \
+            --nofollow-import-to=PIL.BmpImagePlugin \
+            --nofollow-import-to=PIL.GifImagePlugin \
+            --nofollow-import-to=PIL.TiffImagePlugin \
+            --nofollow-import-to=PIL.WebPImagePlugin \
+            --nofollow-import-to=PIL.PdfImagePlugin \
+            --nofollow-import-to=PIL.PcxImagePlugin \
+            --nofollow-import-to=PIL.IcoImagePlugin \
+            --nofollow-import-to=PIL.XpmImagePlugin \
+            --nofollow-import-to=PIL.FtexImagePlugin \
+            --include-package-data=CTkMessagebox \
+            --include-package-data=customtkinter \
+            --macos-create-app-bundle \
+            --macos-app-name=Monolith \
+            --macos-app-icon=icon.ico \
+            --macos-app-mode=gui \
+            monolith.py
+
+      # Packaging
       - name: Package Windows ZIP
         if: matrix.os == 'windows-latest'
-        run: |
-          New-Item -ItemType Directory -Force -Path packaged
-          Compress-Archive -Path dist\JK2ModManager.exe -DestinationPath packaged\JK2ModManager-windows.zip -Force
         shell: powershell
+        run: |
+          mkdir packaged -Force
+          Compress-Archive monolith.exe packaged/Monolith-windows.zip -Force
 
       - name: Package Linux tar.gz
         if: matrix.os == 'ubuntu-latest'
+        shell: bash
         run: |
           mkdir -p packaged
-          tar -czvf packaged/JK2ModManager-linux.tar.gz -C dist JK2ModManager
-        shell: bash
+          tar -czvf packaged/Monolith-linux.tar.gz dist/Monolith
 
       - name: Package macOS DMG
         if: matrix.os == 'macos-latest'
-        run: |
-          mkdir -p dmg/JK2ModManager.app/Contents/MacOS
-          cp dist/JK2ModManager dmg/JK2ModManager.app/Contents/MacOS/
-          mkdir -p packaged
-          hdiutil create -volname "JK2ModManager" -srcfolder dmg -ov -format UDZO packaged/JK2ModManager-macos.dmg
         shell: bash
+        run: |
+          mkdir -p dmg/Monolith.app/Contents/MacOS
+          cp dist/Monolith.app dmg/Monolith.app/Contents/MacOS/
+          chmod +x dmg/Monolith.app/Contents/MacOS/Monolith.app
+          mkdir -p packaged
+          hdiutil create -volname "Monolith" -srcfolder dmg -ov -format UDZO packaged/Monolith-macos.dmg
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: JK2ModManager-${{ matrix.os }}
+          name: Monolith-${{ matrix.os }}
           path: packaged/*
 
   release:
-    name: Publish GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
           path: all-artifacts
 
-      - name: Prepare release assets
+      - name: Create release
         run: |
-          mkdir -p release
+          mkdir release
           find all-artifacts -type f -exec cp {} release/ \;
-
-      - name: Create GitHub Release
-        run: |
           TAG="v$(date +'%Y.%m.%d')-${GITHUB_SHA:0:7}"
-          gh release create "$TAG" release/* \
-            --title "Release $TAG" \
-            --notes "Automated release for commit $GITHUB_SHA."
+          gh release create "$TAG" release/* --title "Release $TAG"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

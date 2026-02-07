@@ -1,12 +1,14 @@
-# JK2 Mod Manager
+# Monolith Mod Manager
 
-[![Release](https://img.shields.io/github/v/release/fl4te/jk2_mod_manager?label=latest%20release)](https://github.com/fl4te/jk2_mod_manager/releases) &nbsp;•&nbsp; [![Build Status](https://github.com/fl4te/jk2_mod_manager/actions/workflows/build_and_release.yml/badge.svg?branch=main)](https://github.com/fl4te/jk2_mod_manager/actions/workflows/build_and_release.yml) &nbsp;•&nbsp; [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Release](https://img.shields.io/github/v/release/fl4te/monolith?label=latest%20release)](https://github.com/fl4te/monolith/releases) &nbsp;•&nbsp; [![Build Status](https://github.com/fl4te/monolith/actions/workflows/build_and_release.yml/badge.svg?branch=main)](https://github.com/fl4te/monolith/actions/workflows/build_and_release.yml) &nbsp;•&nbsp; [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 
 A modern graphical mod management tool for  
 **Star Wars: Jedi Knight II – Jedi Outcast**
 
-JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, launch parameters, and RCON connections from a single interface.
+Monolith provides an all-in-one solution to manage PK3 mods, download mods on the fly, profiles, launch parameters, and RCON connections from a single interface.
+
+![Monolith Screenshot](https://i.ibb.co/vvcgbshF/monolith.png)
 
 ---
 
@@ -21,6 +23,11 @@ JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, la
 - Toggle mods by double-click, context menu, or buttons
 - Embedded preview image support
 
+### Mod Downloads
+- Parses the Monolith Mod Database
+- Mods can be downloaded from within the Mod Manager
+- Live image preview of the selected mod
+
 ### Profiles
 - Multiple independent profiles
 - Per-profile configuration:
@@ -30,7 +37,7 @@ JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, la
 - Quick profile switching
 
 ### Game Launcher
-- Launch Jedi Knight II directly
+- Launch the game directly
 - Developer mode support
 - Logfile support
 - Custom launch parameters
@@ -43,7 +50,6 @@ JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, la
 - Cleaned and readable output
 
 ### UI and Utilities
-- Dark and Light themes
 - Context menus
 - Status indicators
 - Export mod lists to JSON
@@ -52,9 +58,9 @@ JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, la
 
 ## First-Time Setup
 
-1. Launch JK2 Mod Manager
+1. Launch Monolith Mod Manager
 2. Create or select a profile
-3. Select your Jedi Knight II `base` folder
+3. Select your `base` folder
 4. Select the game executable
 5. Click **Launch Game**
 
@@ -84,6 +90,11 @@ JK2 Mod Manager provides an all-in-one solution to manage PK3 mods, profiles, la
 ---
 
 ## Configuration and Log Locations
-Windows: %APPDATA%\JK2ModManager\
-Linux:   ~/.config/JK2ModManager/\
-macOS:   ~/Library/Application Support/JK2ModManager/
+- Monolith will on first launch copy all the legacy config files and logs from the JK2ModManager folder into
+  the created monolith folder and use that instead
+- The JK2ModManager will be automatically deleted after migration
+```
+Windows: %APPDATA%\monolith\
+Linux:   ~/.config/monolith/\
+macOS:   ~/Library/Application Support/monolith/
+```
