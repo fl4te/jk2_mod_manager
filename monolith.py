@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import threading
+from threading import Timer
 import zipfile
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -58,16 +59,16 @@ def get_dpi_scaling():
     return scaling
 
 # Constants
-APP_VERSION = "1.0.3"
+APP_VERSION = "1.0.4"
 UPDATE_VERSION_URL = "https://raw.githubusercontent.com/fl4te/monolith/refs/heads/main/version.txt"
 DISABLED_DIR_NAME = "_disabled"
-# JK2 = assets0,1,2,5 + (6 for the Aspyr macOS build?)
+# JK2 = assets0,1,2,5 | assets4,6 (asian language strings / aspyr macos build)
 # JK2MV = assetsmv,assetsmv2
 # JKA = assets0,1,2,3
 PROTECTED_ASSETS = {
     "assets0.pk3", "assets1.pk3", "assets2.pk3",
-    "assets3.pk3", "assets5.pk3", "assets6.pk3",
-    "assetsmv.pk3", "assetsmv2.pk3"
+    "assets3.pk3", "assets4.pk3", "assets5.pk3",
+    "assets6.pk3", "assetsmv.pk3", "assetsmv2.pk3"
 }
 
 # UI Colors
@@ -231,6 +232,7 @@ class JK2ModManager(ctk.CTk):
         self.profiles: dict[str, dict] = {}
         self.mod_index: dict[str, Path] = {}
         self.config = {}
+        self.search_timer = None
 
         self.rcon_config = configparser.ConfigParser()
         if not os.path.exists(RCON_CONFIG_FILE):
@@ -426,7 +428,7 @@ class JK2ModManager(ctk.CTk):
             font=ctk.CTkFont(size=12), corner_radius=8
         )
         self.entry_search.pack(side="left", fill="x", expand=True)
-        self.entry_search.bind("<KeyRelease>", lambda e: self.refresh_list())
+        self.entry_search.bind("<KeyRelease>", self.on_mod_search_key_release)
 
         ctk.CTkButton(
             search_bar, text="Export List", width=90,
@@ -547,7 +549,7 @@ class JK2ModManager(ctk.CTk):
             font=ctk.CTkFont(size=12), corner_radius=8
         )
         search_entry.pack(side="left", fill="x", expand=True, padx=(0, 10))
-        search_entry.bind("<KeyRelease>", lambda e: self.refresh_download_list())
+        search_entry.bind("<KeyRelease>", self.on_download_search_key_release)
 
         self.btn_refresh_downloads = ctk.CTkButton(
             top_bar, text="Refresh List", command=self.refresh_download_list,
@@ -1208,28 +1210,42 @@ class JK2ModManager(ctk.CTk):
             return []
 
     def refresh_download_list(self):
+        self.refresh_download_list_threaded()
+
+    def refresh_download_list_threaded(self):
+        threading.Thread(target=self._refresh_download_list_worker, daemon=True).start()
+
+    def _refresh_download_list_worker(self):
         mods = self.fetch_mod_list()
         search_term = self.download_search_var.get().lower()
 
         if search_term:
-            mods = [
-                mod for mod in mods
-                if (
-                    search_term in mod["name"].lower()
-                    or search_term in mod.get("author", "").lower()
-                    or search_term in mod.get("uploader", "").lower()
-                    or search_term in mod.get("category", "").lower()
-                )
-            ]
+            scored_mods = []
+            for mod in mods:
+                score = 0
+                if search_term in mod["name"].lower():
+                    score += 4
+                if search_term in mod.get("category", "").lower():
+                    score += 3
+                if search_term in mod.get("author", "").lower():
+                    score += 2
+                if search_term in mod.get("uploader", "").lower():
+                    score += 1
 
-        self._clear_download_treeview()
-        self._populate_download_treeview(mods)
+                if score > 0:
+                    scored_mods.append((score, mod))
+
+            scored_mods.sort(key=lambda x: (-x[0], x[1]["name"].lower()))
+            mods = [mod for score, mod in scored_mods]
+
+        self.after(0, lambda: self._populate_download_treeview(mods))
 
     def _clear_download_treeview(self):
         for i in self.download_tree.get_children():
             self.download_tree.delete(i)
 
     def _populate_download_treeview(self, mods):
+        self.download_tree.delete(*self.download_tree.get_children())
         for mod in mods:
             iid = mod["download_url"]
             self.download_tree.insert(
@@ -1247,7 +1263,6 @@ class JK2ModManager(ctk.CTk):
                 ),
                 tags=("centered",)
             )
-
         self.download_tree.tag_configure("centered", anchor="center")
 
     def download_selected_mods(self):
@@ -1290,7 +1305,7 @@ class JK2ModManager(ctk.CTk):
             self.after(0, lambda: self.set_processing_state(False))
         finally:
             self.after(0, lambda: self.download_progress.set(0))
-            self.after(0, lambda: self.download_progress_percent.configure(text="0%"))
+            self.after(0, lambda: self.download_progress_percent.configure(text="Download Complete"))
 
     def on_download_mod_selected(self, event):
         selected = self.download_tree.selection()
@@ -1310,20 +1325,44 @@ class JK2ModManager(ctk.CTk):
             self.download_preview_canvas.configure(image=None, text="No Preview")
 
     def _load_preview_image(self, preview_url):
-        try:
-            response = requests.get(preview_url, timeout=5)
-            response.raise_for_status()
-            img_data = response.content
-            img = Image.open(io.BytesIO(img_data))
-            preview_width = 200
-            ratio = preview_width / float(img.size[0])
-            preview_height = int((float(img.size[1]) * float(ratio)))
-            img = img.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
-            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_width, preview_height))
+        def worker():
+            try:
+                response = requests.get(preview_url, timeout=5)
+                response.raise_for_status()
+                img_data = response.content
+                img = Image.open(io.BytesIO(img_data))
+                preview_width = 200
+                ratio = preview_width / float(img.size[0])
+                preview_height = int(float(img.size[1]) * ratio)
+                img = img.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
+                ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_width, preview_height))
+
+                self.after(0, lambda ctk_img=ctk_img: (
+                    self.download_preview_canvas.configure(image=ctk_img, text=""),
+                    setattr(self.download_preview_canvas, 'image', ctk_img)
+                ))
+            except Exception as e:
+                self.after(0, lambda: self.download_preview_canvas.configure(image=None, text="Preview Error"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+        def _update_preview_image_impl(self, ctk_img):
             self.download_preview_canvas.configure(image=ctk_img, text="")
             self.download_preview_canvas.image = ctk_img
-        except Exception as e:
-            self.download_preview_canvas.configure(image=None, text="Preview Error")
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_mod_search_key_release(self, event):
+        if hasattr(self, 'search_timer') and self.search_timer:
+            self.search_timer.cancel()
+        self.search_timer = Timer(0.5, lambda: self.refresh_list())
+        self.search_timer.start()
+
+    def on_download_search_key_release(self, event):
+        if hasattr(self, 'search_timer') and self.search_timer:
+            self.search_timer.cancel()
+        self.search_timer = Timer(0.5, self.refresh_download_list_threaded)
+        self.search_timer.start()
 
     # RCON Logic
     def load_rcon_saved_servers(self):
@@ -1395,9 +1434,9 @@ class JK2ModManager(ctk.CTk):
         if not server_ip or not server_port or not command:
             self.show_error("Error", "Server IP, port, and command are required.")
             return
-        if not re.match(r'^[a-zA-Z0-9_\-\.\s]+$', command):
-            self.show_error("Error", "Invalid command.")
-            return
+        threading.Thread(target=self._rcon_send_worker, args=(server_ip, server_port, rcon_password, command), daemon=True).start()
+
+    def _rcon_send_worker(self, server_ip, server_port, rcon_password, command):
         try:
             server_port = int(server_port)
             self.socket.sendto(
@@ -1407,18 +1446,13 @@ class JK2ModManager(ctk.CTk):
             response, _ = self.socket.recvfrom(4096)
             response = response.decode('utf-8', 'ignore')
             cleaned_response = clean_rcon_response(response)
-            self.rcon_output_text.insert("end", f">>> {command}\n{cleaned_response}\n\n")
-            self.rcon_output_text.see("end")
-        except socket.timeout:
-            self.rcon_output_text.insert("end", f"Connection timed out.\n\n")
-            self.rcon_output_text.see("end")
-        except ValueError:
-            self.show_error("Error", "Server port must be a valid number.")
+            self.after(0, lambda: self.rcon_output_text.insert("end", f">>> {command}\n{cleaned_response}\n\n"))
+            self.after(0, lambda: self.rcon_output_text.see("end"))
         except Exception as e:
-            self.rcon_output_text.insert("end", f"Error: {str(e)}\n\n")
-            self.rcon_output_text.see("end")
+            self.after(0, lambda: self.rcon_output_text.insert("end", f"Error: {str(e)}\n\n"))
+            self.after(0, lambda: self.rcon_output_text.see("end"))
         finally:
-            self.rcon_input_entry.delete(0, tk.END)
+            self.after(0, lambda: self.rcon_input_entry.delete(0, tk.END))
 
     # UI Helpers
     def on_mod_selected(self, event):
@@ -1436,29 +1470,85 @@ class JK2ModManager(ctk.CTk):
         try:
             with zipfile.ZipFile(pk3_path, 'r') as z:
                 img_exts = {'.jpg', '.jpeg', '.png', '.tga'}
-                image_files = [f for f in z.namelist() if any(f.lower().endswith(ext) for ext in img_exts)]
-                if not image_files:
-                    self.preview_canvas.configure(image=None, text="No Image Found")
-                    return
-                best_match = image_files[0]
-                for f in image_files:
-                    if "levelshot" in f.lower() or "preview" in f.lower():
-                        best_match = f
-                        break
-                with z.open(best_match) as img_file:
-                    img_data = img_file.read()
-                    try:
-                        img = Image.open(io.BytesIO(img_data))
-                        preview_width = self.preview_box.winfo_width() - 20
-                        ratio = preview_width / float(img.size[0])
-                        preview_height = int((float(img.size[1]) * float(ratio)))
-                        img = img.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
-                        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_width, preview_height))
-                        self.preview_canvas.configure(image=ctk_img, text="")
-                        self.preview_canvas.image = ctk_img
-                    except Exception as e:
-                        self.preview_canvas.configure(image=None, text="Unsupported Image")
+                best_match = None
+                max_score = -5000
+                
+                for name in z.namelist():
+                    if name.endswith('/'):
+                        continue
+
+                    ext = os.path.splitext(name)[1].lower()
+                    if ext not in img_exts:
+                        continue
+
+                    if best_match is None:
+                        best_match = name
+                        max_score = -1000
+
+                    filename = os.path.basename(name).lower()
+                    path_lower = name.lower()
+                    current_score = 0
+
+                    if path_lower.startswith('models/map_objects/mp/flag'):
+                        if filename in ['flag.jpg', 'flag_1.jpg']:
+                            current_score = 1500
+                    
+                    elif filename == 'saber.jpg' and 'models/weapons2/' in path_lower:
+                        current_score = 1400
+                    
+                    elif filename == 'red_line.jpg' and 'gfx/effects/sabers/' in path_lower:
+                        current_score = 1300
+
+                    else:
+                        if 'levelshots/' in path_lower:
+                            current_score = 150
+                        elif 'models/players/' in path_lower:
+                            current_score = 50
+
+                        if filename in ['icon_default.jpg', 'icon_default.tga']:
+                            current_score += 100
+                        elif filename.startswith('map_'):
+                            current_score += 90
+                        elif filename.startswith('icon_'):
+                            current_score += 80
+
+                        trash_words = [
+                            'head', 'torso', 'legs', 'boots', 'hips', 'hand', 
+                            'cap', 'arm', 'face', 'mouth', 'eye', 'collar', 
+                            'glow', 'skin', 'specular'
+                        ]
+                        if any(word in filename for word in trash_words):
+                            current_score -= 200
+
+                    if current_score > max_score:
+                        max_score = current_score
+                        best_match = name
+                        
+                        if max_score >= 1500:
+                            break
+
+                if best_match:
+                    with z.open(best_match) as img_file:
+                        img_data = img_file.read()
+                        try:
+                            img = Image.open(io.BytesIO(img_data))
+                            
+                            preview_width = max(self.preview_box.winfo_width() - 20, 100)
+                            ratio = preview_width / float(img.size[0])
+                            preview_height = int(float(img.size[1]) * ratio)
+                            
+                            img = img.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
+                            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_width, preview_height))
+                            
+                            self.preview_canvas.configure(image=ctk_img, text="")
+                            self.preview_canvas.image = ctk_img
+                        except Exception:
+                            self.preview_canvas.configure(image=None, text="Unsupported Image Format")
+                else:
+                    self.preview_canvas.configure(image=None, text="No Images Found")
+
         except Exception as e:
+            print(f"Error reading PK3: {e}")
             self.preview_canvas.configure(image=None, text="Preview Error")
 
     def show_info(self, title: str, message: str):
