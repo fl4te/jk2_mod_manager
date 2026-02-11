@@ -1,4 +1,4 @@
-﻿import pil_config
+import pil_config
 
 import base64
 import configparser
@@ -16,60 +16,76 @@ import stat
 import subprocess
 import sys
 import threading
+import time
 from threading import Timer
 import zipfile
+import tarfile
 from pathlib import Path
+
 from tkinter import filedialog, ttk
 import tkinter as tk
-
 import customtkinter as ctk
 import requests
-from CTkMessagebox import CTkMessagebox
 from PIL import Image, ImageTk
 
-# DPI Scaling (Should support Windows, MacOS, Linux (X11) and hopefully Wayland)
+# DPI Scaling
 def get_dpi_scaling():
+    for var in ['GDK_SCALE', 'QT_SCALE_FACTOR', 'ELM_SCALE']:
+        val = os.environ.get(var)
+        if val:
+            try:
+                return max(0.5, min(float(val), 3.0))
+            except ValueError:
+                continue
+
     scaling = 1.0
     try:
         if os.name == 'nt':
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)
-            monitor = ctypes.windll.user32.MonitorFromPoint((0, 0), 2)
-            dpi_x = ctypes.c_uint()
-            ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dpi_x), None)
-            scaling = dpi_x.value / 96.0
+            try:
+                monitor = ctypes.windll.user32.MonitorFromPoint(wintypes.POINT(0, 0), 1)
+                dpi_x = ctypes.c_uint()
+                ctypes.windll.shcore.GetDpiForMonitor(monitor, 0, ctypes.byref(dpi_x), None)
+                scaling = dpi_x.value / 96.0
+            except Exception as e:
+                logging.warning(f"Windows DPI scaling failed: {e}")
+                scaling = 1.0
+
         elif os.name == "darwin":
-            from AppKit import NSScreen
-            scaling = NSScreen.mainScreen().backingScaleFactor()
+            try:
+                from AppKit import NSScreen
+                scaling = NSScreen.mainScreen().backingScaleFactor()
+            except Exception as e:
+                logging.warning(f"macOS DPI scaling failed: {e}")
+                scaling = 1.0
+
         elif os.name == "posix":
-            if os.environ.get("XDG_SESSION_TYPE") == "x11":
-                try:
-                    from Xlib import display
-                    d = display.Display()
-                    screen = d.screen()
-                    dpi = screen.width_in_millimeters / (screen.width_in_pixels / screen.width)
-                    scaling = dpi / 96.0
-                except Exception as e:
-                    logging.warning(f"Failed to get X11 DPI scaling: {e}")
-                    scaling = float(os.environ.get("GDK_SCALE", 1.0))
-            else:
-                scaling = float(os.environ.get("GDK_SCALE", 1.0))
+            try:
+                from Xlib import display
+                d = display.Display()
+                resource = d.screen().root.xrm_get_resource_database()
+                if resource:
+                    dpi = resource.get("Xft.dpi", "String")
+                    if dpi:
+                        scaling = float(dpi) / 96.0
+            except Exception as e:
+                logging.warning(f"Linux X11 DPI scaling failed: {e}")
+                scaling = 1.0
+
     except Exception as e:
-        logging.warning(f"Failed to get DPI scaling: {e}")
-        scaling = 1.0
-    return scaling
+        logging.warning(f"General scaling detection failed: {e}")
+
+    return max(0.5, min(scaling, 3.0))
 
 # Constants
-APP_VERSION = "1.0.4"
-UPDATE_VERSION_URL = "https://raw.githubusercontent.com/fl4te/monolith/refs/heads/main/version.txt"
+APP_VERSION = "1.0.5"
 DISABLED_DIR_NAME = "_disabled"
-# JK2 = assets0,1,2,5 | assets4,6 (asian language strings / aspyr macos build)
-# JK2MV = assetsmv,assetsmv2
-# JKA = assets0,1,2,3
-PROTECTED_ASSETS = {
-    "assets0.pk3", "assets1.pk3", "assets2.pk3",
-    "assets3.pk3", "assets4.pk3", "assets5.pk3",
-    "assets6.pk3", "assetsmv.pk3", "assetsmv2.pk3"
-}
+
+JK2_ASSETS = {f"assets{i}.pk3" for i in range(7)}
+JK2MV_ASSETS = {"assetsmv.pk3", "assetsmv2.pk3"}
+ETJK2_ASSETS = {"jk2pro-assets.pk3", "jk2pro-bins.pk3"}
+NWH_ASSETS = {"nwh-assets.pk3", "nwh-bins.pk3"}
+
+PROTECTED_ASSETS = JK2_ASSETS | JK2MV_ASSETS | ETJK2_ASSETS | NWH_ASSETS
 
 # UI Colors
 COLOR_PRIMARY = "#3a86ff"       # Blue
@@ -152,7 +168,8 @@ def clean_rcon_response(response: str) -> str:
 # UI Components
 class CTkTextbox(ctk.CTkTextbox):
     def __init__(self, master, **kwargs):
-        super().__init__(master, wrap="word", **kwargs)
+        wrap_mode = kwargs.pop("wrap", "word")
+        super().__init__(master, wrap=wrap_mode, **kwargs)
 
 class CTkInputDialog(ctk.CTkToplevel):
     def __init__(self, parent, title: str, prompt: str, initialvalue: str = ""):
@@ -163,12 +180,13 @@ class CTkInputDialog(ctk.CTkToplevel):
         self.user_input = None
         self.parent = parent
         self.transient(parent)
-        width = 380
-        height = 160
-        x = parent.winfo_x() + (parent.winfo_width() - width) // 2
-        y = parent.winfo_y() + (parent.winfo_height() - height) // 2
-        self.geometry(f"{width}x{height}+{x}+{y}")
+        self.geometry("380x160")
+
         self.update_idletasks()
+        x = parent.winfo_x() + (parent.winfo_width() - 380) // 2
+        y = parent.winfo_y() + (parent.winfo_height() - 160) // 2
+        self.geometry(f"+{x}+{y}")
+
         self.wait_visibility()
         self.grab_set()
         self.focus_set()
@@ -199,7 +217,6 @@ class CTkInputDialog(ctk.CTkToplevel):
         self.protocol("WM_DELETE_WINDOW", self.on_cancel)
         self.bind("<Return>", lambda event: self.on_ok())
         self.bind("<Escape>", lambda event: self.on_cancel())
-        self.wait_window(self)
 
     def on_ok(self):
         self.user_input = self.entry.get()
@@ -216,6 +233,7 @@ class CTkInputDialog(ctk.CTkToplevel):
 
 def ctk_ask_string(parent, title: str, prompt: str, initialvalue: str = "") -> str | None:
     dialog = CTkInputDialog(parent, title, prompt, initialvalue)
+    parent.wait_window(dialog)
     return dialog.user_input
 
 # Main Application
@@ -233,6 +251,7 @@ class JK2ModManager(ctk.CTk):
         self.mod_index: dict[str, Path] = {}
         self.config = {}
         self.search_timer = None
+        self.update_available = False
 
         self.rcon_config = configparser.ConfigParser()
         if not os.path.exists(RCON_CONFIG_FILE):
@@ -281,6 +300,231 @@ class JK2ModManager(ctk.CTk):
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
     # Core UI
+    def show_info(self, title: str, message: str):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("")
+        dialog.transient(self)
+        dialog.geometry("400x150")
+
+        dialog.update_idletasks()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 150) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.resizable(False, False)
+
+        frame = ctk.CTkFrame(dialog)
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        label = ctk.CTkLabel(frame, text=message, font=ctk.CTkFont(size=12))
+        label.pack(pady=10)
+
+        ok_button = ctk.CTkButton(
+            frame,
+            text="OK",
+            width=80,
+            command=dialog.destroy,
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_PRIMARY,
+            corner_radius=8
+        )
+        ok_button.pack(pady=10)
+
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.focus_set()
+        self.wait_window(dialog)
+
+    def show_error(self, title: str, message: str):
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("")
+        dialog.transient(self)
+        dialog.geometry("400x150")
+
+        dialog.update_idletasks()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 150) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.resizable(False, False)
+
+        frame = ctk.CTkFrame(dialog)
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        label = ctk.CTkLabel(frame, text=message, font=ctk.CTkFont(size=12))
+        label.pack(pady=10)
+
+        ok_button = ctk.CTkButton(
+            frame,
+            text="OK",
+            width=80,
+            command=dialog.destroy,
+            fg_color=COLOR_DANGER,
+            hover_color=COLOR_WARNING,
+            corner_radius=8
+        )
+        ok_button.pack(pady=10)
+
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.focus_set()
+        self.wait_window(dialog)
+
+    def ask_yesno(self, title: str, message: str) -> bool:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("")
+        dialog.transient(self)
+        dialog.geometry("400x150")
+
+        dialog.update_idletasks()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        x = (screen_width - 400) // 2
+        y = (screen_height - 150) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.resizable(False, False)
+
+        frame = ctk.CTkFrame(dialog)
+        frame.pack(fill="both", expand=True, padx=20, pady=20)
+
+        label = ctk.CTkLabel(frame, text=message, font=ctk.CTkFont(size=12))
+        label.pack(pady=10)
+
+        button_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        button_frame.pack(pady=10)
+
+        no_button = ctk.CTkButton(
+            button_frame,
+            text="No",
+            width=80,
+            command=lambda: self._dialog_response(dialog, False),
+            fg_color=COLOR_SCROLL_TROUGH,
+            hover_color=COLOR_SCROLL_THUMB,
+            corner_radius=8
+        )
+        no_button.pack(side="right", padx=5)
+
+        yes_button = ctk.CTkButton(
+            button_frame,
+            text="Yes",
+            width=80,
+            command=lambda: self._dialog_response(dialog, True),
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_PRIMARY,
+            corner_radius=8
+        )
+        yes_button.pack(side="right", padx=5)
+
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.focus_set()
+        self.wait_window(dialog)
+        return getattr(dialog, "response", False)
+
+    def _dialog_response(self, dialog, response: bool):
+        dialog.response = response
+        dialog.grab_release()
+        dialog.destroy()
+
+    def ask_string(self, title: str, prompt: str, initialvalue: str = "") -> str | None:
+        return ctk_ask_string(self, title, prompt, initialvalue)
+
+    def show_update_dialog(self, release_data: dict):
+        latest_version = release_data["tag_name"][1:].split("-")[0]
+
+        raw_changelog = release_data.get('body', 'No changelog provided.')
+        cleaned = raw_changelog.replace('\r', '')
+        for char in ['\u200b', '\u200d', '\ufeff', '\u00ad']:
+            cleaned = cleaned.replace(char, '')
+        cleaned = cleaned.replace('**', '')
+        cleaned = re.sub(r'#+\s*', '', cleaned)
+        cleaned_changelog = cleaned.strip()
+
+        dialog = ctk.CTkToplevel(self)
+        dialog.title(f"Update to {latest_version} Available")
+        dialog.transient(self)
+        dialog.geometry("600x500")
+
+        dialog.update_idletasks()
+        screen_width = dialog.winfo_screenwidth()
+        screen_height = dialog.winfo_screenheight()
+        x = (screen_width - 600) // 2
+        y = (screen_height - 500) // 2
+        dialog.geometry(f"+{x}+{y}")
+        dialog.resizable(False, False)
+
+        main_frame = ctk.CTkFrame(dialog, fg_color=COLOR_SCROLL_TROUGH)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        title_label = ctk.CTkLabel(
+            main_frame,
+            text=f"Update to Version {latest_version} Available",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLOR_TEXT_BRIGHT
+        )
+        title_label.pack(pady=(10, 10))
+
+        changelog_frame = ctk.CTkFrame(main_frame, fg_color=COLOR_SCROLL_TROUGH)
+        changelog_frame.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+
+        changelog_label = ctk.CTkLabel(
+            changelog_frame,
+            text="Changelog:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT_BRIGHT
+        )
+        changelog_label.pack(anchor="w", pady=(0, 5))
+
+        changelog_text = CTkTextbox(
+            changelog_frame,
+            state="normal",
+            fg_color=DARK_BG_COLOR,
+            text_color=COLOR_TEXT_BRIGHT
+        )
+        changelog_text.pack(fill="both", expand=True, padx=5, pady=5)
+        changelog_text.insert("1.0", cleaned_changelog)
+        changelog_text.configure(state="disabled")
+
+        button_frame = ctk.CTkFrame(main_frame, fg_color="transparent")
+        button_frame.pack(fill="x", pady=(0, 10))
+
+        no_button = ctk.CTkButton(
+            button_frame,
+            text="No",
+            width=100,
+            command=lambda: self._dialog_response(dialog, False),
+            fg_color=COLOR_SCROLL_TROUGH,
+            hover_color=COLOR_SCROLL_THUMB,
+            corner_radius=8
+        )
+        no_button.pack(side="right", padx=5)
+
+        yes_button = ctk.CTkButton(
+            button_frame,
+            text="Yes",
+            width=100,
+            command=lambda: self._dialog_update_response(dialog, release_data, True),
+            fg_color=COLOR_ACCENT,
+            hover_color=COLOR_PRIMARY,
+            corner_radius=8
+        )
+        yes_button.pack(side="right", padx=5)
+
+        dialog.wait_visibility()
+        dialog.grab_set()
+        dialog.focus_set()
+        self.wait_window(dialog)
+        return getattr(dialog, "response", False)
+
+    def _dialog_update_response(self, dialog, release_data, response: bool):
+        dialog.response = response
+        if response:
+            self._perform_update(release_data)
+        dialog.grab_release()
+        dialog.destroy()
+
     def create_sidebar(self):
         self.sidebar = ctk.CTkFrame(self, width=240, corner_radius=0, fg_color=COLOR_SCROLL_TROUGH)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
@@ -608,6 +852,12 @@ class JK2ModManager(ctk.CTk):
             font=ctk.CTkFont(size=12)
         )
         self.download_progress_percent.pack(pady=5)
+
+        self.lbl_download_mod_count = ctk.CTkLabel(
+            self.download_frame, text="Total Mods: 0",
+            text_color=COLOR_TEXT_DIM, font=ctk.CTkFont(size=12)
+        )
+        self.lbl_download_mod_count.pack(fill="x", pady=(0, 10))
 
         action_bar = ctk.CTkFrame(self.download_frame, fg_color="transparent")
         action_bar.pack(fill="x", pady=(10, 0))
@@ -1237,6 +1487,8 @@ class JK2ModManager(ctk.CTk):
 
             scored_mods.sort(key=lambda x: (-x[0], x[1]["name"].lower()))
             mods = [mod for score, mod in scored_mods]
+        else:
+            mods.sort(key=lambda x: x.get("date", ""), reverse=True)
 
         self.after(0, lambda: self._populate_download_treeview(mods))
 
@@ -1264,6 +1516,8 @@ class JK2ModManager(ctk.CTk):
                 tags=("centered",)
             )
         self.download_tree.tag_configure("centered", anchor="center")
+
+        self.lbl_download_mod_count.configure(text=f"Total Mods: {len(mods)}")
 
     def download_selected_mods(self):
         selected = self.download_tree.selection()
@@ -1346,12 +1600,6 @@ class JK2ModManager(ctk.CTk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-        def _update_preview_image_impl(self, ctk_img):
-            self.download_preview_canvas.configure(image=ctk_img, text="")
-            self.download_preview_canvas.image = ctk_img
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def on_mod_search_key_release(self, event):
         if hasattr(self, 'search_timer') and self.search_timer:
             self.search_timer.cancel()
@@ -1364,7 +1612,6 @@ class JK2ModManager(ctk.CTk):
         self.search_timer = Timer(0.5, self.refresh_download_list_threaded)
         self.search_timer.start()
 
-    # RCON Logic
     def load_rcon_saved_servers(self):
         self.rcon_config.read(RCON_CONFIG_FILE)
         saved_servers = self.rcon_config.sections()
@@ -1471,105 +1718,92 @@ class JK2ModManager(ctk.CTk):
             with zipfile.ZipFile(pk3_path, 'r') as z:
                 img_exts = {'.jpg', '.jpeg', '.png', '.tga'}
                 best_match = None
-                max_score = -5000
-                
+                max_score = -20000
+
+                folder_weights = {
+                    'levelshots/': 10000,
+                    'models/players/': 400,
+                    'models/weapons2/': 300,
+                    'models/map_objects/mp/': 200,
+                    'gfx/menus/': 100,
+                    'gfx/ui/': 50
+                }
+
                 for name in z.namelist():
-                    if name.endswith('/'):
+                    if name.endswith('/') or any(x in name.lower() for x in ['__macosx', 'thumbs.db']):
                         continue
 
-                    ext = os.path.splitext(name)[1].lower()
+                    full_path_lower = name.lower()
+                    base_name = os.path.basename(name).lower()
+                    name_no_ext, ext = os.path.splitext(base_name)
+
                     if ext not in img_exts:
                         continue
 
-                    if best_match is None:
-                        best_match = name
-                        max_score = -1000
+                    score = 1
 
-                    filename = os.path.basename(name).lower()
-                    path_lower = name.lower()
-                    current_score = 0
-
-                    if path_lower.startswith('models/map_objects/mp/flag'):
-                        if filename in ['flag.jpg', 'flag_1.jpg']:
-                            current_score = 1500
-                    
-                    elif filename == 'saber.jpg' and 'models/weapons2/' in path_lower:
-                        current_score = 1400
-                    
-                    elif filename == 'red_line.jpg' and 'gfx/effects/sabers/' in path_lower:
-                        current_score = 1300
-
-                    else:
-                        if 'levelshots/' in path_lower:
-                            current_score = 150
-                        elif 'models/players/' in path_lower:
-                            current_score = 50
-
-                        if filename in ['icon_default.jpg', 'icon_default.tga']:
-                            current_score += 100
-                        elif filename.startswith('map_'):
-                            current_score += 90
-                        elif filename.startswith('icon_'):
-                            current_score += 80
-
-                        trash_words = [
-                            'head', 'torso', 'legs', 'boots', 'hips', 'hand', 
-                            'cap', 'arm', 'face', 'mouth', 'eye', 'collar', 
-                            'glow', 'skin', 'specular'
-                        ]
-                        if any(word in filename for word in trash_words):
-                            current_score -= 200
-
-                    if current_score > max_score:
-                        max_score = current_score
-                        best_match = name
-                        
-                        if max_score >= 1500:
+                    for folder, weight in folder_weights.items():
+                        if folder in full_path_lower:
+                            score += weight
                             break
+
+                    if name_no_ext == 'preview':
+                        score += 1600
+                    elif name_no_ext == 'icon_default':
+                        score += 1500
+                    elif name_no_ext == 'levelshot':
+                        score += 1000
+                    elif name_no_ext.startswith('map_'):
+                        score += 400
+
+                    team_keywords = ['icon_blue', 'icon_red', 'icon_green', '/team/', '_blue', '_red']
+                    if any(k in full_path_lower for k in team_keywords):
+                        score -= 800
+
+                    trash_keywords = [
+                        'eye', 'mouth', 'face', 'hand', 'torso', 'arm', 'leg', 
+                        'hips', 'cap', '_glow', '_spec', '_norm', '_reflect'
+                    ]
+                    if any(k in name_no_ext for k in trash_keywords):
+                        score -= 15000 
+
+                    if ext.lower() in ['.jpg', '.jpeg']:
+                        score += 10
+
+                    if score > max_score:
+                        max_score = score
+                        best_match = name
 
                 if best_match:
                     with z.open(best_match) as img_file:
-                        img_data = img_file.read()
+                        img_data = io.BytesIO(img_file.read())
                         try:
-                            img = Image.open(io.BytesIO(img_data))
-                            
-                            preview_width = max(self.preview_box.winfo_width() - 20, 100)
-                            ratio = preview_width / float(img.size[0])
-                            preview_height = int(float(img.size[1]) * ratio)
-                            
-                            img = img.resize((preview_width, preview_height), Image.Resampling.LANCZOS)
-                            ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(preview_width, preview_height))
-                            
-                            self.preview_canvas.configure(image=ctk_img, text="")
-                            self.preview_canvas.image = ctk_img
-                        except Exception:
-                            self.preview_canvas.configure(image=None, text="Unsupported Image Format")
+                            img = Image.open(img_data)
+                        except Exception as img_error:
+                            logging.error(f"Failed to open image {best_match}: {img_error}")
+                            self.preview_canvas.configure(image=None, text="Invalid Image")
+                            return
+                        
+                        if img.mode in ("RGBA", "P", "LA"):
+                            img = img.convert("RGBA")
+                        elif img.mode != "RGB":
+                            img = img.convert("RGB")
+
+                        p_width = max(self.preview_box.winfo_width() - 20, 100)
+                        ratio = p_width / float(img.size[0])
+                        p_height = int(float(img.size[1]) * ratio)
+
+                        img = img.resize((p_width, p_height), Image.Resampling.LANCZOS)
+                        ctk_img = ctk.CTkImage(light_image=img, dark_image=img, size=(p_width, p_height))
+
+                        self.preview_canvas.configure(image=ctk_img, text="")
+                        self.preview_canvas.image = ctk_img
                 else:
-                    self.preview_canvas.configure(image=None, text="No Images Found")
+                    self.preview_canvas.configure(image=None, text="No Preview Found")
 
         except Exception as e:
-            print(f"Error reading PK3: {e}")
+            logging.error(f"Error processing {pk3_path.name}: {e}")
             self.preview_canvas.configure(image=None, text="Preview Error")
-
-    def show_info(self, title: str, message: str):
-        CTkMessagebox(title=title, message=message, icon="info", option_focus=1)
-
-    def show_error(self, title: str, message: str):
-        CTkMessagebox(title=title, message=message, icon="cancel")
-
-    def ask_yesno(self, title: str, message: str) -> bool:
-        msg = CTkMessagebox(title=title, message=message, icon="question", option_1="No", option_2="Yes")
-        response = msg.get()
-        return response == "Yes"
-
-    def ask_string(self, title: str, prompt: str, initialvalue: str = "") -> str | None:
-        return ctk_ask_string(self, title, prompt, initialvalue)
-
-    def ask_open_files(self, title: str, filetypes: list[tuple[str, str]]) -> list[str]:
-        return list(filedialog.askopenfilenames(parent=self, title=title, filetypes=filetypes))
-
-    def ask_save_file(self, title: str, defaultextension: str, filetypes: list[tuple[str, str]]) -> str | None:
-        return filedialog.asksaveasfilename(parent=self, title=title, defaultextension=defaultextension, filetypes=filetypes)
 
     def create_context_menu(self):
         bg_color = "#16213e"
@@ -1647,31 +1881,247 @@ class JK2ModManager(ctk.CTk):
         self.tree.tag_configure("disabled", foreground=COLOR_DANGER)
 
     def check_for_updates_threaded(self):
-        self.btn_check_updates.configure(state="disabled")
-        threading.Thread(target=self.check_for_updates, daemon=True).start()
+        self.btn_check_updates.configure(state="disabled", text="Checking for updates...")
+        thread = threading.Thread(target=lambda: self.auto_update(), daemon=True)
+        thread.start()
 
-    def check_for_updates(self):
+    def auto_update(self):
         try:
-            response = requests.get(UPDATE_VERSION_URL, timeout=5)
-            response.raise_for_status()
-            latest_version = response.text.strip()
-            if self.version_tuple(latest_version) <= self.version_tuple(APP_VERSION):
-                self.after(0, lambda: self.show_info("Up to Date", f"You are running the latest version ({APP_VERSION})."))
-            else:
-                self.after(0, lambda: self.show_info(
-                    "Update Available",
-                    f"A new version is available!\n\nCurrent: {APP_VERSION}\nLatest: {latest_version}\n\nCheck the GitHub Repository."
+            version_url = "https://raw.githubusercontent.com/fl4te/monolith/refs/heads/main/version.txt"
+            v_response = requests.get(version_url, timeout=5)
+            v_response.raise_for_status()
+
+            latest_version_str = v_response.text.strip().replace("v", "")
+            current_version_str = APP_VERSION.replace("v", "")
+
+            if self.version_tuple(latest_version_str) <= self.version_tuple(current_version_str):
+                self.after(0, lambda: self.btn_check_updates.configure(
+                    state="normal",
+                    text="Check for Updates",
+                    fg_color=DARK_BG_COLOR
                 ))
+                self.after(0, lambda: self.show_info("Up to Date", f"You are running the latest version ({APP_VERSION})."))
+                return
+
+            api_url = "https://api.github.com/repos/fl4te/monolith/releases/latest"
+            response = requests.get(api_url, timeout=5)
+            response.raise_for_status()
+            release_data = response.json()
+
+            self.update_available = True
+            self.after(0, lambda: self.btn_check_updates.configure(
+                state="normal",
+                text="Update Available!",
+                fg_color=COLOR_SUCCESS
+            ))
+
+            self.after(0, lambda: self.show_update_dialog(release_data))
+
         except Exception as e:
-            self.after(0, lambda: self.show_error("Update Check Failed", f"Could not check for updates.\n\n{e}"))
-        finally:
-            self.after(0, lambda: self.btn_check_updates.configure(state="normal"))
+            logging.error(f"Update check failed: {e}")
+            self.after(0, lambda: self.btn_check_updates.configure(
+                state="normal",
+                text="Check for Updates",
+                fg_color=DARK_BG_COLOR
+            ))
+            self.after(0, lambda: self.show_error("Update Failed", f"Failed to check for updates: {e}"))
+
+    def get_app_path(self):
+        if getattr(sys, 'frozen', False) or hasattr(sys, '_MEIPASS'):
+            return Path(sys.executable).resolve()
+        return Path(sys.argv[0]).resolve()
+
+    def _perform_update(self, release_data: dict):
+        threading.Thread(target=self._perform_update_thread, args=(release_data,), daemon=True).start()
+
+    def _perform_update_thread(self, release_data: dict):
+        asset_name = None
+        if sys.platform.startswith("win32"):
+            asset_name = "Monolith-windows.zip"
+        elif sys.platform.startswith("linux"):
+            asset_name = "Monolith-linux.tar.gz"
+        elif sys.platform == "darwin":
+            asset_name = "Monolith-macos.dmg"
+
+        if not asset_name:
+            self.after(0, lambda: self.show_error("Update Failed", "Could not determine OS."))
+            return
+
+        download_url = next(
+            (asset["browser_download_url"] for asset in release_data["assets"] if asset["name"] == asset_name),
+            None,
+        )
+        expected_hash = next(
+            (asset.get("sha256") for asset in release_data["assets"] if asset["name"] == asset_name),
+            None,
+        )
+
+        if not download_url:
+            self.after(0, lambda: self.show_error("Update Failed", "Download URL not found."))
+            return
+
+        self.after(0, lambda: self.status_var.set("Downloading update..."))
+        temp_file = self.download_asset(download_url, asset_name, expected_hash)
+        if not temp_file:
+            self.after(0, lambda: self.show_error("Update Failed", "Download failed or hash mismatch."))
+            return
+
+        self.after(0, lambda: self.status_var.set("Installing update..."))
+        if self.apply_update(temp_file, asset_name):
+            self.after(0, lambda: self.show_info("Update Complete", "Restarting application..."))
+            self.after(1500, self.restart_application)
+        else:
+            self.after(0, lambda: self.show_error("Update Failed", "Failed to apply update."))
+
+    def download_asset(self, download_url: str, asset_name: str, expected_hash: str | None = None, max_retries=3) -> Path | None:
+        for attempt in range(max_retries):
+            try:
+                response = requests.get(download_url, stream=True, timeout=10)
+                response.raise_for_status()
+
+                temp_file = CONFIG_DIR / f"update_temp_{asset_name.replace('/', '_')}"
+                with open(temp_file, "wb") as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        f.write(chunk)
+
+                if expected_hash:
+                    actual_hash = get_sha256_hash(temp_file)
+                    if actual_hash != expected_hash:
+                        logging.error(f"Hash mismatch for {asset_name}. Expected {expected_hash}, got {actual_hash}")
+                        temp_file.unlink(missing_ok=True)
+                        return None
+
+                return temp_file
+            except Exception as e:
+                if attempt == max_retries - 1:
+                    logging.error(f"Download failed after {max_retries} attempts: {e}")
+                    return None
+                time.sleep(2)
+
+    def apply_update(self, temp_file: Path, asset_name: str) -> bool:
+        if asset_name.endswith(".dmg"):
+            self.after(0, lambda: self.show_info(
+                "Update Ready",
+                f"The update has been downloaded to:\n{temp_file}\n\n"
+                "Please open the DMG file and drag the app to Applications."
+            ))
+            if os.name == "darwin":
+                subprocess.Popen(["open", str(temp_file)])
+            return True
+
+        lock_file = CONFIG_DIR / "update.lock"
+        try:
+            lock_file.touch()
+            app_path = self.get_app_path()
+            old_backup = app_path.with_suffix(".old")
+
+            try:
+                if old_backup.exists():
+                    old_backup.unlink(missing_ok=True)
+                app_path.rename(old_backup)
+
+                temp_dir = CONFIG_DIR / "update_extract"
+                if temp_dir.exists():
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+                temp_dir.mkdir(parents=True, exist_ok=True)
+
+                if asset_name.endswith(".tar.gz"):
+                    with tarfile.open(temp_file, "r:gz") as tar:
+                        tar.extractall(temp_dir)
+                elif asset_name.endswith(".zip"):
+                    with zipfile.ZipFile(temp_file, 'r') as zip_ref:
+                        zip_ref.extractall(temp_dir)
+
+                extracted_files = list(temp_dir.rglob("*"))
+                new_build = next((f for f in extracted_files if f.name == app_path.name), None)
+                if not new_build:
+                    new_build = next((f for f in extracted_files if f.is_file() and not f.name.startswith('.')), None)
+
+                if not new_build:
+                    self.after(0, lambda: self.show_error("Update Error", "Could not find the application file in the update package."))
+                    return False
+
+                try:
+                    test_file = app_path.with_suffix(".test")
+                    try:
+                        with open(test_file, "w") as f:
+                            f.write("test")
+                        test_file.unlink()
+                    except PermissionError:
+                        self.after(0, lambda: self.show_error(
+                            "Permission Denied",
+                            "The update requires admin rights. The application will now restart with admin privileges."
+                        ))
+                        self.request_admin_restart()
+                        return False
+
+                    shutil.move(str(new_build), str(app_path))
+                    app_path.chmod(0o755)
+                except Exception as e:
+                    self.after(0, lambda: self.show_error(
+                        "File Error",
+                        f"Failed to replace files: {str(e)}\n\n"
+                        "Please ensure no other instances of the application are running and try again."
+                    ))
+                    return False
+
+                lock_file.unlink(missing_ok=True)
+                return True
+
+            except Exception as e:
+                logging.error(f"Update failed: {e}")
+                if old_backup.exists():
+                    old_backup.rename(app_path)
+                lock_file.unlink(missing_ok=True)
+                return False
+
+        except Exception as e:
+            logging.error(f"Global update failure: {e}")
+            lock_file.unlink(missing_ok=True)
+            return False
+
+    def request_admin_restart(self):
+        if os.name == 'nt':
+            ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            )
+            sys.exit()
+
+    def restart_application(self):
+        try:
+            if getattr(sys, 'frozen', False):
+                subprocess.Popen([sys.executable] + sys.argv[1:])
+                sys.exit()
+            else:
+                python = sys.executable
+                os.execv(python, [python] + sys.argv)
+        except Exception as e:
+            logging.error(f"Failed to restart: {e}")
+            self.show_error("Restart Failed", "Please restart the application manually.")
 
     def version_tuple(self, v: str) -> tuple[int, int, int]:
         try:
-            return tuple(map(int, v.split(".")))
+            parts = v.split(".")
+            while len(parts) < 3:
+                parts.append("0")
+            return tuple(map(int, parts[:3]))
         except ValueError:
             return (0, 0, 0)
+
+    def ask_open_files(self, title: str, filetypes: list[tuple[str, str]]) -> list[str]:
+        return list(filedialog.askopenfilenames(parent=self, title=title, filetypes=filetypes))
+
+    def ask_save_file(self, title: str, defaultextension: str, filetypes: list[tuple[str, str]]) -> str | None:
+        return filedialog.asksaveasfilename(parent=self, title=title, defaultextension=defaultextension, filetypes=filetypes)
+
+    def check_for_incomplete_update(self):
+        lock_file = CONFIG_DIR / "update.lock"
+        if lock_file.exists():
+            self.show_error("Update Incomplete", "The previous update failed. Restoring backup...")
+            old_backup = self.get_app_path().with_suffix(".old")
+            if old_backup.exists():
+                old_backup.rename(self.get_app_path())
+            lock_file.unlink(missing_ok=True)
 
 if __name__ == "__main__":
     scaling = get_dpi_scaling()
@@ -1681,5 +2131,6 @@ if __name__ == "__main__":
     ctk.set_default_color_theme("dark-blue")
 
     app = JK2ModManager()
+    app.check_for_incomplete_update()
     app.refresh_download_list()
     app.mainloop()
